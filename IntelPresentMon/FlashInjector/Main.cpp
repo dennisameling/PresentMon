@@ -56,7 +56,18 @@ int main(int argc, char** argv)
         // DLL to inject
         const stdfs::path libraryPath = injectorPath / std::format("FlashInjectorLibrary-{}.dll", PM_BUILD_PLATFORM);
 
-        const bool weAre32Bit = PM_BUILD_PLATFORM == "Win32"s;
+        // This injector only attaches to processes whose architecture matches its own:
+        // the injected library runs inside the target and the remote-thread LoadLibrary
+        // technique requires a matching kernel32 base. On Windows-on-ARM the kernel spawns
+        // one injector per architecture (native ARM64 plus emulated x64/x86) so that every
+        // possible target is covered. Map our own build platform to a process architecture.
+        const auto ourArchitecture = [] {
+            const std::string platform = PM_BUILD_PLATFORM;
+            if (platform == "Win32") return win::ProcessArchitecture::x86;
+            if (platform == "x64")   return win::ProcessArchitecture::x64;
+            if (platform == "ARM64") return win::ProcessArchitecture::Arm64;
+            return win::ProcessArchitecture::Unknown;
+        }();
 
         if (!stdfs::exists(libraryPath)) {
             LOGE << "Cannot find library: " << libraryPath << std::endl;;
@@ -87,7 +98,12 @@ int main(int argc, char** argv)
                     const auto processNameLower = str::ToLower(processName);
                     if (processNameLower == tgt && !processesAttached.contains(processId)) {
                         auto hProcTarget = win::OpenProcess(processId, PROCESS_QUERY_LIMITED_INFORMATION);
-                        if (win::ProcessIs32Bit(hProcTarget) == weAre32Bit) {
+                        // Only attach when the target's architecture positively matches ours. An
+                        // Unknown result (unrecognized machine, or an unmapped build platform)
+                        // must never count as a match, or we would inject a mismatched-ABI DLL.
+                        const auto targetArchitecture = win::GetProcessArchitecture(hProcTarget);
+                        if (targetArchitecture != win::ProcessArchitecture::Unknown
+                            && targetArchitecture == ourArchitecture) {
                             LibraryInject::Attach(processId, libraryPath);
                             LOGI << "    Injected DLL to process with PID: " << processId << std::endl;
                             processesAttached.insert(processId);

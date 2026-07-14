@@ -16,12 +16,19 @@ namespace p2c::kern
 	{
 		std::lock_guard lk{ mtx_ };
 		if (!IsActive(false) && active) {
-			pInjector32_ = std::make_unique<InjectorModule_>(true);
-			pInjector64_ = std::make_unique<InjectorModule_>(false);
+			// Spawn one injector process per architecture we can target. Each injector
+			// only attaches to same-architecture processes (the injected library runs
+			// inside the target). On Windows-on-ARM that means a native ARM64 injector
+			// plus x64 and x86 injectors that run under emulation to reach emulated
+			// games; on x64 hosts, just the x64 and x86 injectors.
+#if defined(_M_ARM64)
+			injectors_.push_back(std::make_unique<InjectorModule_>("FlashInjector-ARM64.exe"));
+#endif
+			injectors_.push_back(std::make_unique<InjectorModule_>("FlashInjector-x64.exe"));
+			injectors_.push_back(std::make_unique<InjectorModule_>("FlashInjector-Win32.exe"));
 		}
 		else if (!active) {
-			pInjector32_.reset();
-			pInjector64_.reset();
+			injectors_.clear();
 		}
 	}
 	bool InjectorComplex::IsActive(bool lock) const
@@ -30,15 +37,15 @@ namespace p2c::kern
 		if (lock) {
 			lk.lock();
 		}
-		assert(bool(pInjector32_) == bool(pInjector64_));
-		return (bool)pInjector32_;
+		return !injectors_.empty();
 	}
 	void InjectorComplex::UpdateConfig(const GfxLayer::Extension::OverlayConfig& cfg)
 	{
 		std::lock_guard lk{ mtx_ };
 		if (IsActive(false)) {
-			pInjector32_->UpdateConfig(cfg);
-			pInjector64_->UpdateConfig(cfg);
+			for (auto& pInjector : injectors_) {
+				pInjector->UpdateConfig(cfg);
+			}
 		}
 	}
 	void InjectorComplex::ChangeTarget(std::optional<std::string> targetModuleName)
@@ -47,27 +54,23 @@ namespace p2c::kern
 		if (IsActive(false) && targetModuleName_ != targetModuleName) {
 			pmlog_dbg("Writing new target name to injectors").pmwatch(targetModuleName.value_or(""s));
 			targetModuleName_ = targetModuleName;
-			pInjector32_->ChangeTarget(targetModuleName);
-			pInjector64_->ChangeTarget(targetModuleName);
+			for (auto& pInjector : injectors_) {
+				pInjector->ChangeTarget(targetModuleName);
+			}
 		}
 	}
-	InjectorComplex::InjectorModule_::InjectorModule_(bool is32Bit)
+	InjectorComplex::InjectorModule_::InjectorModule_(std::string injectorExeName)
 		:
 		pipeOut_{ ioctx_ },
 		pipeIn_{ ioctx_ },
 		pipeErr_{ ioctx_ },
-		is32Bit_{ is32Bit },
+		injectorExeName_{ std::move(injectorExeName) },
 		injectorProcess_{ ioctx_ }
 	{
-		// Determine the correct injector executable
-		auto exe = is32Bit
-			? "FlashInjector-Win32.exe"
-			: "FlashInjector-x64.exe";
-
 		// Spawn the child with Asio pipes for stdin/stdout/stderr
 		injectorProcess_ = bp2::process{
 			ioctx_,
-			exe, // using relative path to injector here due to issue with boost.process (following up)
+			injectorExeName_, // using relative path to injector here due to issue with boost.process (following up)
 			/* no args = */ std::vector<std::string>{},
 			bp2::windows::process_creation_flags<CREATE_NO_WINDOW>(),
 			bp2::process_stdio{ pipeIn_, pipeOut_, pipeErr_ }
@@ -176,7 +179,7 @@ namespace p2c::kern
 				std::getline(is, stderrLine);
 
 				try {
-					pmlog_dbg("Stderr from injector").pmwatch(is32Bit_).pmwatch(stderrLine);
+					pmlog_dbg("Stderr from injector").pmwatch(injectorExeName_).pmwatch(stderrLine);
 				}
 				catch (...) {
 					pmlog_error("Failed to read stderr from injector");

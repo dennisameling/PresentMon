@@ -3,6 +3,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <vector>
 #include <CommonUtilities/mt/Thread.h>
 #include "../iact/ActionClient.h"
 #include <boost/process/v2/process.hpp>
@@ -19,7 +20,7 @@ namespace p2c::kern
         class InjectorModule_
         {
         public:
-            InjectorModule_(bool is32Bit);
+            InjectorModule_(std::string injectorExeName);
             void UpdateConfig(const GfxLayer::Extension::OverlayConfig& cfg);
             void ChangeTarget(std::optional<std::string> targetModuleName);
 
@@ -27,7 +28,7 @@ namespace p2c::kern
             void SpawnReadPidTask_();
             void SpawnReadErrTask_();
             void PushConfig_();
-            bool                               is32Bit_;
+            std::string                        injectorExeName_;
             as::io_context                     ioctx_;
             as::writable_pipe                  pipeIn_;     // us to child's stdin
             as::readable_pipe                  pipeOut_;    // child's stdout to us
@@ -49,7 +50,7 @@ namespace p2c::kern
     private:
         mutable std::mutex mtx_;
         std::optional<std::string> targetModuleName_;
-        std::unique_ptr<InjectorModule_> pInjector32_;
-        std::unique_ptr<InjectorModule_> pInjector64_;
+        // one injector process per targetable architecture (see SetActive)
+        std::vector<std::unique_ptr<InjectorModule_>> injectors_;
     };
 }

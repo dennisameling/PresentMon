@@ -23,6 +23,19 @@ namespace pmon::util::win
 	std::filesystem::path GetExecutableModulePathFromPid(uint32_t pid);
 	// checks whether a process is 32-bit or 64-bit
 	bool ProcessIs32Bit(HANDLE hProc);
+	// the instruction-set architecture a process actually runs as (accounts for
+	// emulation, e.g. an x64 or x86 process running on Windows-on-ARM)
+	enum class ProcessArchitecture
+	{
+		Unknown,
+		x86,
+		x64,
+		Arm64,
+	};
+	// determines the architecture a process runs as, distinguishing native from
+	// emulated processes (e.g. native ARM64 vs. emulated x64 on Windows-on-ARM,
+	// which ProcessIs32Bit cannot tell apart)
+	ProcessArchitecture GetProcessArchitecture(HANDLE hProc);
 	// convert a guid to string
 	std::wstring GuidToString(const GUID& guid);
 	// open a file-system path in the shell (typically Explorer for directories)

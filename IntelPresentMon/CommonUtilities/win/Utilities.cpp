@@ -177,6 +177,76 @@ namespace pmon::util::win
 		}
 		throw Except<HrError>("failed to check WOW64 status");
 	}
+
+	namespace
+	{
+		ProcessArchitecture MachineToArchitecture_(USHORT machine)
+		{
+			switch (machine) {
+			case IMAGE_FILE_MACHINE_I386:  return ProcessArchitecture::x86;
+			case IMAGE_FILE_MACHINE_AMD64: return ProcessArchitecture::x64;
+			case IMAGE_FILE_MACHINE_ARM64: return ProcessArchitecture::Arm64;
+			default:                       return ProcessArchitecture::Unknown;
+			}
+		}
+	}
+
+	ProcessArchitecture GetProcessArchitecture(HANDLE hProc)
+	{
+		// The APIs used here postdate the build's target Windows version (_WIN32_WINNT
+		// 0x0603), so they are resolved dynamically and we fall back through progressively
+		// older queries. Each newer query is a strict superset of what the one below can
+		// distinguish on the Windows versions where the newer one is unavailable.
+
+		// Tier 1: ProcessMachineTypeInfo (Windows 11+). This is the ONLY query that
+		// correctly reports an x64 process emulated on ARM64. IsWow64Process2 reports such
+		// a process as "not WOW64" (UNKNOWN) because x64-on-ARM64 is a separate emulation
+		// layer from classic WOW64, making native ARM64 and emulated x64 indistinguishable
+		// by that older query (verified on Windows-on-ARM hardware).
+		using GetProcessInformationFn = BOOL(WINAPI*)(HANDLE, int, LPVOID, DWORD);
+		static const auto pGetProcessInformation = reinterpret_cast<GetProcessInformationFn>(
+			GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetProcessInformation"));
+		if (pGetProcessInformation) {
+			// Matches PROCESS_MACHINE_INFORMATION; defined locally as the SDK omits it at
+			// our target version. ProcessMachineTypeInfo == 9 in PROCESS_INFORMATION_CLASS.
+			struct ProcessMachineInformation { USHORT ProcessMachine; USHORT Res0; DWORD MachineAttributes; } info{};
+			constexpr int ProcessMachineTypeInfo = 9;
+			if (pGetProcessInformation(hProc, ProcessMachineTypeInfo, &info, sizeof(info))) {
+				return MachineToArchitecture_(info.ProcessMachine);
+			}
+			// Only fall through when this Windows version doesn't implement the information
+			// class (pre-Windows 11 rejects it with ERROR_INVALID_PARAMETER). Any other
+			// failure would let the coarser queries below misreport an x64-on-ARM64 process
+			// as native ARM64, so surface it rather than silently returning a wrong answer.
+			if (GetLastError() != ERROR_INVALID_PARAMETER) {
+				throw Except<HrError>("failed to query process machine type");
+			}
+		}
+
+		// Tier 2: IsWow64Process2 (Windows 10 1709+). No x64-on-ARM64 emulation exists on
+		// these systems, so reporting native vs. WOW (x86) architecture is sufficient.
+		using IsWow64Process2Fn = BOOL(WINAPI*)(HANDLE, USHORT*, USHORT*);
+		static const auto pIsWow64Process2 = reinterpret_cast<IsWow64Process2Fn>(
+			GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "IsWow64Process2"));
+		if (pIsWow64Process2) {
+			USHORT processMachine = IMAGE_FILE_MACHINE_UNKNOWN;
+			USHORT nativeMachine = IMAGE_FILE_MACHINE_UNKNOWN;
+			if (!pIsWow64Process2(hProc, &processMachine, &nativeMachine)) {
+				throw Except<HrError>("failed to check process architecture");
+			}
+			// processMachine == UNKNOWN means the process runs natively (no WOW64), so its
+			// architecture is the host's native machine.
+			return MachineToArchitecture_(processMachine == IMAGE_FILE_MACHINE_UNKNOWN
+				? nativeMachine : processMachine);
+		}
+
+		// Tier 3: IsWow64Process (legacy). Only x86/x64 hosts are possible this far back.
+		BOOL isWow64 = FALSE;
+		if (!IsWow64Process(hProc, &isWow64)) {
+			throw Except<HrError>("failed to check WOW64 status");
+		}
+		return isWow64 ? ProcessArchitecture::x86 : ProcessArchitecture::x64;
+	}
 	std::wstring GuidToString(const GUID& guid)
 	{
 		wchar_t buf[64];
